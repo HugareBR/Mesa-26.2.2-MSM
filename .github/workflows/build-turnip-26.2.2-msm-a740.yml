@@ -1,12 +1,3 @@
-[A6XXRegs.REG_A6XX_PC_MODE_CNTL,    0x1f1f],
-``` citeturn328561search0
-
-
-Eu também faria duas correções preventivas: usar os patches NDK r29 de forma explícita, como os builds atuais fazem, e instalar `PyYAML` no venv. Os três ajustes NDK r29 que você está tentando aplicar são efetivamente usados em builds Turnip atuais. citeturn110085search1turn110085search6
-
-Use este YAML:
-
-```yaml
 name: Build Turnip 26.2.2 MSM A740
 
 on:
