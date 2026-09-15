@@ -1,0 +1,434 @@
+name: Build Turnip 26.3-devel MSM A740
+
+on:
+  workflow_dispatch:
+
+env:
+  NDK_VERSION: android-ndk-r29
+  ANDROID_API: "34"
+  MESA_REF: main
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            git \
+            curl \
+            unzip \
+            zip \
+            python3 \
+            python3-venv \
+            ninja-build \
+            ccache \
+            flex \
+            bison \
+            pkg-config \
+            patchelf \
+            glslang-tools \
+            clang \
+            llvm \
+            lld \
+            binutils \
+            file
+
+      - name: Prepare Python
+        run: |
+          set -euxo pipefail
+
+          python3 -m venv "$HOME/mesa-venv"
+
+          "$HOME/mesa-venv/bin/pip" install --upgrade pip
+
+          "$HOME/mesa-venv/bin/pip" install \
+            meson \
+            mako \
+            packaging \
+            PyYAML \
+            jinja2 \
+            ply
+
+          echo "$HOME/mesa-venv/bin" >> "$GITHUB_PATH"
+
+          "$HOME/mesa-venv/bin/meson" --version
+
+      - name: Download Android NDK r29
+        run: |
+          set -euxo pipefail
+
+          cd "$HOME"
+
+          curl -fL --retry 3 \
+            "https://dl.google.com/android/repository/${NDK_VERSION}-linux.zip" \
+            -o ndk.zip
+
+          unzip -q ndk.zip
+
+          NDKBIN="$HOME/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -x "$NDKBIN/aarch64-linux-android${ANDROID_API}-clang"
+          test -x "$NDKBIN/aarch64-linux-android${ANDROID_API}-clang++"
+
+          "$NDKBIN/aarch64-linux-android${ANDROID_API}-clang" --version
+
+      - name: Clone Mesa 26.3-devel
+        run: |
+          set -euxo pipefail
+
+          git clone \
+            --depth 1 \
+            --branch "$MESA_REF" \
+            https://gitlab.freedesktop.org/mesa/mesa.git \
+            "$HOME/mesa"
+
+          cd "$HOME/mesa"
+
+          echo "================================"
+          echo "MESA VERSION"
+          echo "================================"
+
+          cat VERSION
+
+          echo
+          echo "================================"
+          echo "MESA COMMIT"
+          echo "================================"
+
+          git rev-parse HEAD
+          git rev-parse --short=12 HEAD
+
+          echo
+          echo "================================"
+          echo "LATEST COMMIT"
+          echo "================================"
+
+          git log -1 --oneline
+
+      - name: Verify A740 support
+        run: |
+          set -euxo pipefail
+
+          cd "$HOME/mesa"
+
+          FILE="src/freedreno/common/freedreno_devices.py"
+
+          test -f "$FILE"
+
+          echo "=== A740 definition ==="
+
+          grep -n -A40 "a740_raw_magic_regs" "$FILE" | head -45 || true
+
+          echo
+          echo "=== Checking PC_MODE_CNTL 0x1f1f ==="
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("src/freedreno/common/freedreno_devices.py")
+          text = path.read_text()
+
+          match = re.search(
+              r"^a740_raw_magic_regs\s*=\s*\[(.*?)^\s*\]",
+              text,
+              re.MULTILINE | re.DOTALL,
+          )
+
+          if not match:
+              raise SystemExit(
+                  "ERRO: bloco a740_raw_magic_regs não encontrado"
+              )
+
+          block = match.group(1)
+
+          if not re.search(
+              r"REG_A6XX_PC_MODE_CNTL\s*,\s*0x0*1f1f",
+              block,
+          ):
+              raise SystemExit(
+                  "ERRO: PC_MODE_CNTL 0x1f1f não encontrado no A740"
+              )
+
+          print("OK: A740 PC_MODE_CNTL = 0x1f1f")
+          PY
+
+      - name: Apply NDK r29 compatibility fixes
+        run: |
+          set -euxo pipefail
+
+          cd "$HOME/mesa"
+
+          echo "=== native_handle compatibility ==="
+
+          if grep -q \
+            'typedef const native_handle_t\* buffer_handle_t;' \
+            include/android_stub/cutils/native_handle.h; then
+
+            sed -i \
+              's/typedef const native_handle_t\* buffer_handle_t;/typedef void* buffer_handle_t;/g' \
+              include/android_stub/cutils/native_handle.h
+
+            echo "Applied native_handle fix"
+          else
+            echo "native_handle fix already unnecessary/applied upstream"
+          fi
+
+          echo
+          echo "=== u_gralloc compatibility ==="
+
+          if grep -q \
+            'hnd->handle' \
+            src/util/u_gralloc/u_gralloc_fallback.c; then
+
+            sed -i \
+              's/, hnd->handle/, (void *)hnd->handle/g' \
+              src/util/u_gralloc/u_gralloc_fallback.c
+
+            echo "Checked/applied u_gralloc fix"
+          fi
+
+          echo
+          echo "=== vk_android compatibility ==="
+
+          if test -f src/vulkan/runtime/vk_android.c; then
+            sed -i -E \
+              's/([a-zA-Z_][a-zA-Z0-9_]*)->handle->/((const native_handle_t *)\1->handle)->/g' \
+              src/vulkan/runtime/vk_android.c
+          fi
+
+          echo
+          echo "=== Resulting diff ==="
+
+          git diff -- \
+            include/android_stub/cutils/native_handle.h \
+            src/util/u_gralloc/u_gralloc_fallback.c \
+            src/vulkan/runtime/vk_android.c || true
+
+          git diff --check
+
+      - name: Create cross files
+        run: |
+          set -euxo pipefail
+
+          NDKBIN="$HOME/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          cat > "$HOME/mesa/android-aarch64.txt" <<EOF
+          [binaries]
+          ar = '$NDKBIN/llvm-ar'
+          c = ['ccache', '$NDKBIN/aarch64-linux-android${ANDROID_API}-clang']
+          cpp = ['ccache', '$NDKBIN/aarch64-linux-android${ANDROID_API}-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
+          c_ld = '$NDKBIN/ld.lld'
+          cpp_ld = '$NDKBIN/ld.lld'
+          strip = '$NDKBIN/llvm-strip'
+          pkg-config = ['env', 'PKG_CONFIG_LIBDIR=/nonexistent', '/usr/bin/pkg-config']
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'armv8'
+          endian = 'little'
+
+          [properties]
+          needs_exe_wrapper = true
+          EOF
+
+          cat > "$HOME/mesa/native.txt" <<'EOF'
+          [binaries]
+          c = ['ccache', 'clang']
+          cpp = ['ccache', 'clang++']
+          ar = 'llvm-ar'
+          strip = 'llvm-strip'
+          c_ld = 'ld.lld'
+          cpp_ld = 'ld.lld'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'x86_64'
+          cpu = 'x86_64'
+          endian = 'little'
+          EOF
+
+          echo "=== Android cross file ==="
+          cat "$HOME/mesa/android-aarch64.txt"
+
+      - name: Configure Turnip MSM
+        run: |
+          set -euxo pipefail
+
+          cd "$HOME/mesa"
+
+          meson setup build-android-aarch64 \
+            --cross-file android-aarch64.txt \
+            --native-file native.txt \
+            --prefix /tmp/turnip-msm \
+            -Dbuildtype=release \
+            -Dstrip=true \
+            -Dplatforms=android \
+            -Dplatform-sdk-version="${ANDROID_API}" \
+            -Dandroid-stub=true \
+            -Dandroid-libbacktrace=disabled \
+            -Dvideo-codecs= \
+            -Dgallium-drivers= \
+            -Dvulkan-drivers=freedreno \
+            -Dvulkan-beta=true \
+            -Dfreedreno-kmds=msm \
+            -Dallow-fallback-for=libdrm \
+            -Degl=disabled \
+            -Dllvm=disabled
+
+          echo
+          echo "=== Meson configuration ==="
+
+          meson configure build-android-aarch64
+
+      - name: Build Turnip
+        run: |
+          set -euxo pipefail
+
+          cd "$HOME/mesa"
+
+          ninja \
+            -C build-android-aarch64 \
+            -j"$(nproc)"
+
+          ninja \
+            -C build-android-aarch64 \
+            install
+
+      - name: Locate and verify driver
+        run: |
+          set -euxo pipefail
+
+          DRIVER="$(find /tmp/turnip-msm \
+            -type f \
+            -name libvulkan_freedreno.so \
+            -print -quit)"
+
+          if [ -z "$DRIVER" ]; then
+            echo "ERRO: libvulkan_freedreno.so não encontrado"
+            find /tmp/turnip-msm -type f -maxdepth 8 || true
+            exit 1
+          fi
+
+          test -s "$DRIVER"
+
+          echo "================================"
+          echo "DRIVER=$DRIVER"
+          echo "================================"
+
+          ls -lh "$DRIVER"
+
+          echo
+          echo "=== FILE ==="
+
+          file "$DRIVER"
+
+          echo
+          echo "=== ELF HEADER ==="
+
+          llvm-readelf -h "$DRIVER" | \
+            grep -E 'Class:|Machine:|Type:' || true
+
+          echo
+          echo "=== SONAME / NEEDED ==="
+
+          llvm-readelf -d "$DRIVER" | \
+            grep -E 'SONAME|NEEDED' || true
+
+          echo
+          echo "=== SHA256 ==="
+
+          sha256sum "$DRIVER"
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+
+          cp \
+            "$DRIVER" \
+            "$GITHUB_WORKSPACE/dist/libvulkan_freedreno.so"
+
+      - name: Create build information
+        run: |
+          set -euxo pipefail
+
+          cd "$HOME/mesa"
+
+          VERSION="$(cat VERSION)"
+          COMMIT="$(git rev-parse HEAD)"
+          SHORT_COMMIT="$(git rev-parse --short=12 HEAD)"
+          COMMIT_DATE="$(git show -s --format=%cI HEAD)"
+
+          {
+            echo "Mesa version: $VERSION"
+            echo "Mesa commit: $COMMIT"
+            echo "Mesa short commit: $SHORT_COMMIT"
+            echo "Mesa commit date: $COMMIT_DATE"
+            echo "Android API: $ANDROID_API"
+            echo "Android NDK: $NDK_VERSION"
+            echo "Vulkan driver: freedreno / Turnip"
+            echo "Kernel interface: MSM DRM"
+            echo "Target: ARM64 / AArch64"
+            echo "GPU target: Adreno 740 / SM8550"
+          } > "$GITHUB_WORKSPACE/dist/build-info.txt"
+
+          cat "$GITHUB_WORKSPACE/dist/build-info.txt"
+
+      - name: Package
+        run: |
+          set -euxo pipefail
+
+          cd "$HOME/mesa"
+
+          VERSION="$(cat VERSION)"
+          COMMIT="$(git rev-parse --short=12 HEAD)"
+
+          cd "$GITHUB_WORKSPACE/dist"
+
+          cat > meta.json <<EOF
+          {
+            "schemaVersion": 1,
+            "name": "Mesa Turnip 26.3-devel MSM A740",
+            "description": "Mesa ${VERSION} Turnip for Android ARM64 using MSM DRM. Git ${COMMIT}.",
+            "author": "HugareBR",
+            "packageVersion": "1",
+            "vendor": "Mesa",
+            "driverVersion": "${VERSION}-${COMMIT}",
+            "minApi": 28,
+            "libraryName": "libvulkan_freedreno.so"
+          }
+          EOF
+
+          zip -9 \
+            turnip-26.3-devel-msm-a740.zip \
+            libvulkan_freedreno.so \
+            meta.json \
+            build-info.txt
+
+          echo
+          echo "=== DIST ==="
+
+          ls -lh
+
+          echo
+          echo "=== CHECKSUMS ==="
+
+          sha256sum \
+            libvulkan_freedreno.so \
+            turnip-26.3-devel-msm-a740.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: turnip-26.3-devel-msm-a740
+          path: |
+            dist/libvulkan_freedreno.so
+            dist/meta.json
+            dist/build-info.txt
+            dist/turnip-26.3-devel-msm-a740.zip
+          if-no-files-found: error
