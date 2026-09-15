@@ -1,0 +1,121 @@
+name: Build Xenia Edge Linux ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - edge
+
+jobs:
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify architecture
+        run: |
+          uname -a
+          uname -m
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            python3 \
+            python3-pip \
+            git \
+            curl \
+            wget \
+            pkg-config \
+            clang-21 \
+            llvm-21 \
+            lld-21 \
+            libc++-21-dev \
+            libc++abi-21-dev \
+            liblz4-dev \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            libx11-xcb-dev \
+            libfontconfig1-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxss-dev \
+            libxkbcommon-dev \
+            libxfixes-dev
+
+      - name: Show compiler versions
+        run: |
+          clang-21 --version
+          cmake --version
+          ninja --version
+          python3 --version
+
+      - name: Download Slang compiler
+        env:
+          CC: clang-21
+          CXX: clang++-21
+        run: |
+          ./xb slang
+
+      - name: Configure Xenia
+        env:
+          CC: clang-21
+          CXX: clang++-21
+        run: |
+          ./xb setup
+
+      - name: Build Release ARM64
+        env:
+          CC: clang-21
+          CXX: clang++-21
+        run: |
+          ./xb build --config=release
+
+      - name: Inspect output
+        run: |
+          echo "=== Architecture ==="
+          find build/bin/Linux/Release -maxdepth 1 -type f -executable -print \
+            -exec file {} \;
+
+          echo
+          echo "=== Files ==="
+          ls -lah build/bin/Linux/Release/
+
+      - name: Package
+        run: |
+          mkdir -p artifact/Xenia-Edge-Linux-ARM64
+
+          cp -a build/bin/Linux/Release/* \
+            artifact/Xenia-Edge-Linux-ARM64/
+
+          cp LICENSE artifact/Xenia-Edge-Linux-ARM64/ 2>/dev/null || true
+
+          cd artifact
+          tar -cJf Xenia-Edge-Linux-ARM64.tar.xz \
+            Xenia-Edge-Linux-ARM64
+
+          ls -lh Xenia-Edge-Linux-ARM64.tar.xz
+
+      - name: Upload ARM64 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xenia-Edge-Linux-ARM64
+          path: artifact/Xenia-Edge-Linux-ARM64.tar.xz
+          if-no-files-found: error
