@@ -8,16 +8,8 @@ jobs:
     runs-on: ubuntu-26.04-arm
 
     steps:
-      - name: Checkout
+      - name: Checkout workflow repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Verify architecture
-        run: |
-          uname -a
-          uname -m
 
       - name: Install dependencies
         run: |
@@ -57,16 +49,36 @@ jobs:
             libxkbcommon-dev \
             libxfixes-dev
 
+      - name: Clone Xenia Edge
+        run: |
+          git clone \
+            --branch edge \
+            --recursive \
+            https://github.com/has207/xenia-edge.git \
+            xenia-edge
+
+          cd xenia-edge
+
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+          echo "=== ROOT FILES ==="
+          ls -lah
+
+          echo
+          echo "=== XB ==="
+          ls -l xb xenia-build.py
+
       - name: Show compiler versions
         run: |
           uname -m
           clang-21 --version
           clang++-21 --version
-          llvm-config-21 --version
           cmake --version
           ninja --version
 
       - name: Download Slang compiler
+        working-directory: xenia-edge
         env:
           CC: clang-21
           CXX: clang++-21
@@ -74,6 +86,7 @@ jobs:
           ./xb slang
 
       - name: Configure Xenia
+        working-directory: xenia-edge
         env:
           CC: clang-21
           CXX: clang++-21
@@ -81,6 +94,7 @@ jobs:
           ./xb setup
 
       - name: Build Release ARM64
+        working-directory: xenia-edge
         env:
           CC: clang-21
           CXX: clang++-21
@@ -88,23 +102,28 @@ jobs:
           ./xb build --config=release
 
       - name: Inspect output
+        working-directory: xenia-edge
         run: |
-          echo "=== BUILD TREE ==="
-          find build/bin -maxdepth 4 -type f -print || true
+          echo "=== BUILD OUTPUT ==="
+          find build -type f -executable -print -exec file {} \; || true
 
           echo
-          echo "=== EXECUTABLES ==="
-          find build -type f -executable -exec file {} \; | grep -iE 'ARM|aarch64' || true
+          echo "=== BIN ==="
+          find build/bin -maxdepth 4 -type f -print || true
 
       - name: Package
         run: |
           mkdir -p artifact/Xenia-Edge-Linux-ARM64
 
-          cp -a build/bin/Linux/Release/. \
+          cp -a \
+            xenia-edge/build/bin/Linux/Release/. \
             artifact/Xenia-Edge-Linux-ARM64/
 
           echo "=== PACKAGE CONTENT ==="
-          find artifact/Xenia-Edge-Linux-ARM64 -maxdepth 2 -type f -print
+          find artifact/Xenia-Edge-Linux-ARM64 \
+            -maxdepth 2 \
+            -type f \
+            -print
 
           tar -C artifact \
             -cJf artifact/Xenia-Edge-Linux-ARM64.tar.xz \
