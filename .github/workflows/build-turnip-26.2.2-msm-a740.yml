@@ -1,3 +1,12 @@
+[A6XXRegs.REG_A6XX_PC_MODE_CNTL,    0x1f1f],
+``` citeturn328561search0
+
+
+Eu também faria duas correções preventivas: usar os patches NDK r29 de forma explícita, como os builds atuais fazem, e instalar `PyYAML` no venv. Os três ajustes NDK r29 que você está tentando aplicar são efetivamente usados em builds Turnip atuais. citeturn110085search1turn110085search6
+
+Use este YAML:
+
+```yaml
 name: Build Turnip 26.2.2 MSM A740
 
 on:
@@ -33,7 +42,11 @@ jobs:
 
           python3 -m venv "$HOME/mesa-venv"
           "$HOME/mesa-venv/bin/pip" install --upgrade pip
-          "$HOME/mesa-venv/bin/pip" install meson mako packaging
+          "$HOME/mesa-venv/bin/pip" install \
+            meson \
+            mako \
+            packaging \
+            PyYAML
 
           echo "$HOME/mesa-venv/bin" >> "$GITHUB_PATH"
 
@@ -77,30 +90,43 @@ jobs:
 
           cd "$HOME/mesa"
 
+          FILE="src/freedreno/common/freedreno_devices.py"
+
+          test -f "$FILE"
+
+          echo "=== A740 block ==="
+
+          grep -n -A30 "a740_raw_magic_regs = \[" "$FILE" | head -35
+
+          echo
+          echo "=== Checking PC_MODE_CNTL ==="
+
           python3 <<'PY'
           from pathlib import Path
           import re
 
-          p = Path("src/freedreno/common/freedreno_devices.py")
-          s = p.read_text()
+          path = Path("src/freedreno/common/freedreno_devices.py")
+          text = path.read_text()
 
-          m = re.search(
-              r"a740_raw_magic_regs\s*=\s*\[(.*?)(?:\n\])",
-              s,
-              re.S,
+          match = re.search(
+              r"^a740_raw_magic_regs\s*=\s*\[(.*?)^\s*\]",
+              text,
+              re.MULTILINE | re.DOTALL,
           )
 
-          if not m:
-              raise SystemExit("ERRO: bloco a740_raw_magic_regs não encontrado")
+          if not match:
+              raise SystemExit(
+                  "ERRO: bloco a740_raw_magic_regs não encontrado"
+              )
 
-          block = m.group(1)
+          block = match.group(1)
 
           if not re.search(
-              r"REG_A6XX_PC_MODE_CNTL\s*,\s*0x1f1f",
+              r"REG_A6XX_PC_MODE_CNTL\s*,\s*0x0*1f1f",
               block,
           ):
               raise SystemExit(
-                  "ERRO: fix PC_MODE_CNTL 0x1f1f não encontrado no A740"
+                  "ERRO: PC_MODE_CNTL 0x1f1f não encontrado no A740"
               )
 
           print("OK: A740 PC_MODE_CNTL = 0x1f1f")
@@ -112,18 +138,36 @@ jobs:
 
           cd "$HOME/mesa"
 
-          # Mesmos ajustes usados por builds Android Turnip atuais.
+          echo "Applying buffer_handle_t fix..."
+
           sed -i \
-            's/typedef const native_handle_t\* buffer_handle_t;/typedef void\* buffer_handle_t;/g' \
+            's/typedef const native_handle_t\* buffer_handle_t;/typedef void* buffer_handle_t;/g' \
             include/android_stub/cutils/native_handle.h
 
+          echo "Applying u_gralloc fix..."
+
           sed -i \
-            's/, hnd->handle/, (void \*)hnd->handle/g' \
+            's/, hnd->handle/, (void *)hnd->handle/g' \
             src/util/u_gralloc/u_gralloc_fallback.c
 
-          sed -i -E \
-            's/([a-z_]+)->handle->/((const native_handle_t *)\1->handle)->/g' \
+          echo "Applying vk_android fixes..."
+
+          sed -i \
+            's/native_buffer->handle->/((const native_handle_t *)native_buffer->handle)->/g' \
             src/vulkan/runtime/vk_android.c
+
+          sed -i \
+            's/anb->handle->/((const native_handle_t *)anb->handle)->/g' \
+            src/vulkan/runtime/vk_android.c
+
+          echo
+          echo "=== Applied changes ==="
+          git diff -- \
+            include/android_stub/cutils/native_handle.h \
+            src/util/u_gralloc/u_gralloc_fallback.c \
+            src/vulkan/runtime/vk_android.c
+
+          git diff --check
 
       - name: Create cross files
         run: |
@@ -182,6 +226,7 @@ jobs:
             -Dplatforms=android \
             -Dplatform-sdk-version="${ANDROID_API}" \
             -Dandroid-stub=true \
+            -Dandroid-libbacktrace=disabled \
             -Dvideo-codecs= \
             -Dgallium-drivers= \
             -Dvulkan-drivers=freedreno \
@@ -189,7 +234,7 @@ jobs:
             -Dfreedreno-kmds=msm \
             -Dallow-fallback-for=libdrm \
             -Degl=disabled \
-            -Dandroid-libbacktrace=disabled
+            -Dllvm=disabled
 
       - name: Build
         run: |
@@ -260,6 +305,7 @@ jobs:
             meta.json
 
           ls -lh
+
           sha256sum \
             libvulkan_freedreno.so \
             turnip-26.2.2-msm-a740.zip
