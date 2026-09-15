@@ -5,26 +5,27 @@ on:
 
 jobs:
   build-linux-arm64:
+    name: build-linux-arm64
     runs-on: ubuntu-26.04-arm
 
     steps:
-      - name: Checkout workflow repository
-        uses: actions/checkout@v4
-
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euxo pipefail
+
           sudo apt-get update
 
           sudo apt-get install -y \
             build-essential \
-            cmake \
-            ninja-build \
-            python3 \
-            python3-pip \
             git \
             curl \
             wget \
+            python3 \
+            python3-pip \
             pkg-config \
+            cmake \
+            ninja-build \
             clang-21 \
             llvm-21 \
             lld-21 \
@@ -33,13 +34,14 @@ jobs:
             liblz4-dev \
             libvulkan-dev \
             mesa-vulkan-drivers \
-            libx11-xcb-dev \
+            libgtk-3-dev \
             libfontconfig1-dev \
             libasound2-dev \
             libpulse-dev \
             libudev-dev \
             libdbus-1-dev \
             libx11-dev \
+            libx11-xcb-dev \
             libxext-dev \
             libxrandr-dev \
             libxinerama-dev \
@@ -49,8 +51,35 @@ jobs:
             libxkbcommon-dev \
             libxfixes-dev
 
-      - name: Clone Xenia Edge
+      - name: Show compiler versions
+        shell: bash
         run: |
+          set -euxo pipefail
+
+          echo "=== ARCH ==="
+          uname -m
+
+          echo "=== CLANG ==="
+          clang-21 --version
+          clang++-21 --version
+
+          echo "=== LLVM ==="
+          llvm-config-21 --version
+
+          echo "=== CMAKE ==="
+          cmake --version
+
+          echo "=== NINJA ==="
+          ninja --version
+
+          echo "=== PYTHON ==="
+          python3 --version
+
+      - name: Clone Xenia Edge
+        shell: bash
+        run: |
+          set -euxo pipefail
+
           git clone \
             --branch edge \
             --recursive \
@@ -62,78 +91,116 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive
 
-          echo "=== ROOT FILES ==="
-          ls -lah
+          echo
+          echo "=== COMMIT ==="
+          git rev-parse HEAD
+          git log -1 --oneline
 
           echo
           echo "=== XB ==="
-          ls -l xb xenia-build.py
-
-      - name: Show compiler versions
-        run: |
-          uname -m
-          clang-21 --version
-          clang++-21 --version
-          cmake --version
-          ninja --version
+          ls -lah xb xenia-build.py
 
       - name: Download Slang compiler
         working-directory: xenia-edge
+        shell: bash
         env:
           CC: clang-21
           CXX: clang++-21
         run: |
+          set -euxo pipefail
+
           ./xb slang
+
+          echo
+          echo "=== SLANG ==="
+          find .slang -type f -name slangc -print -exec file {} \;
 
       - name: Configure Xenia
         working-directory: xenia-edge
+        shell: bash
         env:
           CC: clang-21
           CXX: clang++-21
         run: |
+          set -euxo pipefail
+
           ./xb setup
 
       - name: Build Release ARM64
         working-directory: xenia-edge
+        shell: bash
         env:
           CC: clang-21
           CXX: clang++-21
         run: |
+          set -euxo pipefail
+
           ./xb build --config=release
 
-      - name: Inspect output
+      - name: Inspect ARM64 build
         working-directory: xenia-edge
+        shell: bash
         run: |
-          echo "=== BUILD OUTPUT ==="
-          find build -type f -executable -print -exec file {} \; || true
+          set -euxo pipefail
+
+          echo "=== RELEASE DIRECTORY ==="
+          ls -lah build/bin/Linux/Release/
 
           echo
-          echo "=== BIN ==="
-          find build/bin -maxdepth 4 -type f -print || true
+          echo "=== FILE TYPES ==="
+          find build/bin/Linux/Release \
+            -maxdepth 1 \
+            -type f \
+            -exec file {} \;
+
+          echo
+          echo "=== ARM64 EXECUTABLES ==="
+          find build/bin/Linux/Release \
+            -maxdepth 1 \
+            -type f \
+            -executable \
+            -print \
+            -exec file {} \;
 
       - name: Package
+        shell: bash
         run: |
+          set -euxo pipefail
+
           mkdir -p artifact/Xenia-Edge-Linux-ARM64
 
           cp -a \
             xenia-edge/build/bin/Linux/Release/. \
             artifact/Xenia-Edge-Linux-ARM64/
 
+          echo
           echo "=== PACKAGE CONTENT ==="
           find artifact/Xenia-Edge-Linux-ARM64 \
             -maxdepth 2 \
             -type f \
             -print
 
-          tar -C artifact \
+          tar \
+            -C artifact \
             -cJf artifact/Xenia-Edge-Linux-ARM64.tar.xz \
             Xenia-Edge-Linux-ARM64
 
+          echo
+          echo "=== FINAL ARCHIVE ==="
           ls -lh artifact/Xenia-Edge-Linux-ARM64.tar.xz
+
+          sha256sum \
+            artifact/Xenia-Edge-Linux-ARM64.tar.xz \
+            > artifact/Xenia-Edge-Linux-ARM64.tar.xz.sha256
+
+          cat artifact/Xenia-Edge-Linux-ARM64.tar.xz.sha256
 
       - name: Upload ARM64 build
         uses: actions/upload-artifact@v4
         with:
           name: Xenia-Edge-Linux-ARM64
-          path: artifact/Xenia-Edge-Linux-ARM64.tar.xz
+          path: |
+            artifact/Xenia-Edge-Linux-ARM64.tar.xz
+            artifact/Xenia-Edge-Linux-ARM64.tar.xz.sha256
           if-no-files-found: error
+          compression-level: 0
